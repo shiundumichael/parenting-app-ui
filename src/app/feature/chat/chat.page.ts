@@ -1,13 +1,12 @@
 import { Component, OnInit, ChangeDetectorRef, ViewChild } from "@angular/core";
-import {
-  ChatMessage,
-  ChatResponseOption,
-  ResponseCustomAction,
-  mockMessageGenerator,
-} from "./message.model";
 import { AnimationOptions } from "ngx-lottie";
 import { IonContent } from "@ionic/angular";
-import { ChatService, IRapidProMessage } from './chat-service/chat.service';
+import { IRapidProMessage, NotificationService } from 'src/app/shared/services/notification/notification.service';
+import { ActivatedRoute, Router } from '@angular/router';
+import { IfStmt } from '@angular/compiler';
+import { ChatMessage, ChatResponseOption, ResponseCustomAction } from 'src/app/shared/services/chat/chat-msg.model';
+import { OfflineChatService } from 'src/app/shared/services/chat/offline/offline-chat.service';
+import { OnlineChatService } from 'src/app/shared/services/chat/online/online-chat.service';
 
 @Component({
   selector: "app-chat",
@@ -25,42 +24,66 @@ export class ChatPage implements OnInit {
     | "talking"
     | "run-in"
     | "still"
-    | "absent";
+    | "absent" = "walking-in";
   backgroundBlobVisible: boolean = false;
   botAnimOptions: AnimationOptions = {
     loop: false,
     path: "/assets/lottie-animations/Walk_In_Entrance_Pass_v2.json",
   };
 
-  @ViewChild("messagesContent", { static: false })
-  private messagesContent: IonContent;
+  // Used for getting estimates of number of messages sent automatically
+  autoReplyEnabled: boolean = false;
+  autoReplyDelay = 500;
+  autoReplyWord = "N";
+  autoRepeatPhrase = "Repeat simulation";
+  autoEndPhrase = "THE END";
+
+  messagesSent: number = 0;
+  messagesReceived: number = 0;
+  debugMsg: string = "testing???";
+
+  sentResponsesByMessage: { [messageText: string]: string[] } = {};
+
+  triggerMessage: string = "plh_simulation";
+
   scrollingInterval: any;
 
   inputValue: string = "";
 
-  showingAllMessages = false;
+  showingAllMessages = true;
+
+  character: "guide" | "egg" = "guide";
 
   constructor(
-    private chatService: ChatService,
-    private cd: ChangeDetectorRef
-  ) { }
+    private cd: ChangeDetectorRef,
+    private route: ActivatedRoute,
+    private chatService: OnlineChatService
+  ) {
+  }
 
   ngOnInit() {
-    this.chatService.messageSubject
+    this.route.queryParams.subscribe(params => {
+      if(params["character"] && params["character"] === "egg") {
+        this.character = "egg";
+      } else {
+        this.character = "guide";
+      }
+    });
+    this.chatService.messages$
       .asObservable()
-      .subscribe((msg) => {
-        this.onReceiveRapidProMessage(msg);
+      .subscribe((messages) => {
+        console.log("from chat service ", messages);
+        if (messages.length > 0) {
+          this.onNewMessage(messages[messages.length - 1]);
+        }
       });
-    setTimeout(() => {
-      this.chatService.sendRapidproMessage("start_demo");
-      this.botBlobState = "still";
-    }, 3000);
   }
 
   onReceiveRapidProMessage(rapidMsg: IRapidProMessage) {
+    this.messagesReceived += 1;
     let chatMsg: ChatMessage = {
       sender: "bot",
-      text: rapidMsg.body,
+      text: rapidMsg.message
     };
     if (rapidMsg.quick_replies) {
       try {
@@ -82,12 +105,57 @@ export class ChatPage implements OnInit {
         console.log("Error parsing quick replies", ex);
       }
     }
+    if (this.autoReplyEnabled) {
+      setTimeout(() => {
+        if (rapidMsg.message.toLowerCase().indexOf(this.autoEndPhrase.toLowerCase()) > -1) {
+          this.debugMsg = "THE END!!";
+        } else if (rapidMsg.message.toLowerCase().indexOf(this.autoRepeatPhrase.toLowerCase()) > -1) {
+          this.debugMsg = "repeating...";
+          this.chatService.sendMessage({
+            sender: "user",
+            text: this.triggerMessage
+          });
+        } else if (rapidMsg.message.toLowerCase().indexOf("sorry, i don't understand") > -1) {
+          this.debugMsg = "flow is stuck. repeating...";
+          this.chatService.sendMessage({
+            sender: "user",
+            text: this.triggerMessage
+          });
+        } else {
+          this.debugMsg = "";
+          if (chatMsg.responseOptions && chatMsg.responseOptions.length > 0) {
+            let responseOption = chatMsg.responseOptions[0];
+            if (!this.sentResponsesByMessage[chatMsg.text]) {
+              this.sentResponsesByMessage[chatMsg.text] = [];
+            } else {
+              let unusedResponses = chatMsg.responseOptions
+                .filter((option) => this.sentResponsesByMessage[chatMsg.text].indexOf(option.text) < 0);
+              if (unusedResponses.length < 1) {
+                const responseIndex = Math.floor(Math.random() * chatMsg.responseOptions.length);
+                if (chatMsg.responseOptions[responseIndex]) {
+                  responseOption = chatMsg.responseOptions[responseIndex];
+                } else {
+                  responseOption = chatMsg.responseOptions[0];
+                }
+              } else {
+                responseOption = unusedResponses[0];
+              }
+            }
+            this.sentResponsesByMessage[chatMsg.text].push(responseOption.text);
+            this.selectResponseOption(responseOption);
+          } else {
+            this.debugMsg = "auto reply: N";
+            this.sendCustomOption(this.autoReplyWord);
+          }
+        }
+      }, this.autoReplyDelay);
+    }
     setTimeout(() => {
-      this.onReceiveMessage(chatMsg);
+      this.onNewMessage(chatMsg);
     });
   }
 
-  onReceiveMessage(message: ChatMessage) {
+  onNewMessage(message: ChatMessage) {
     console.log(
       "Got to the bit where I do something with the messages!",
       message
@@ -114,7 +182,6 @@ export class ChatPage implements OnInit {
     } else {
       this.messages = this.allMessages.slice(this.allMessages.length - 2);
     }
-    this.messagesContent.scrollToBottom(2000);
     this.cd.detectChanges();
   }
 
@@ -149,11 +216,15 @@ export class ChatPage implements OnInit {
   }
 
   sendCustomOption(text: string) {
-    this.chatService.sendRapidproMessage(text);
-    this.onReceiveMessage({
+    this.onNewMessage({
       text: text,
       sender: "user",
     });
+    this.chatService.sendMessage({
+      sender: "user",
+      text: text
+    });
+    this.messagesSent += 1;
   }
 
   selectResponseOption(option: ChatResponseOption) {
@@ -161,11 +232,16 @@ export class ChatPage implements OnInit {
     if (option.customAction) {
       this.doCustomResponseAction(option.customAction);
     }
-    this.chatService.sendRapidproMessage(option.text);
-    this.onReceiveMessage({
+    this.onNewMessage({
       text: option.text,
       sender: "user",
     });
+    this.chatService.sendMessage({
+      sender: "user",
+      text: option.text
+    });
+    this.messagesSent += 1;
+    
   }
 
   toggleShowAllMessages() {
@@ -176,5 +252,9 @@ export class ChatPage implements OnInit {
       this.messages = this.allMessages;
       this.showingAllMessages = true;
     }
+  }
+
+  stringify(obj: any) {
+    return JSON.stringify(obj);
   }
 }
